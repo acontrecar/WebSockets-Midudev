@@ -3,13 +3,17 @@ import logger from "morgan";
 
 import { Server } from "socket.io";
 import { createServer } from "node:http";
+import { createClient } from "@supabase/supabase-js";
 
-import dotenv from 'dotenv'
-import { createClient } from "@libsql/client/.";
+import dotenv from "dotenv";
 
-dotenv.config()
+dotenv.config();
 
-const port =  3000;
+const port = 3000;
+
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_KEY;
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 const app = express();
 const server = createServer(app);
@@ -17,19 +21,11 @@ const io = new Server(server, {
   connectionStateRecovery: {},
 });
 
-const db = createClient({
-  url: 'libsql://crack-arclight-acontrecar.turso.io',
-  authToken: process.env.DB_TOKEN
-})
+// supabase.from("messages");
 
-await db.execute(`
-  CREATE TABLE IF NOT EXITS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    content TEXT
-  )
-`)
+console.log(supabase);
 
-io.on("connection", (socket) => {
+io.on("connection", async (socket) => {
   console.log("a user connected");
 
   socket.on("disconnect", () => {
@@ -37,27 +33,56 @@ io.on("connection", (socket) => {
   });
 
   socket.on("chat message", async (msg) => {
-
-    let result
+    let result;
+    let lastInsertedId;
+    let username = socket.handshake.auth.username ?? "Anonymous";
+    console.log({ username });
 
     try {
-      result = await db.execute({
-        sql: `INSERT INTO messages (content) VALUES (:message)`,
-        args: {message : msg}
-      })
+      result = await supabase
+        .from("messages")
+        .insert([{ content: msg, username: username }]);
 
-      console.log('insertado');
-      
+      lastInsertedId = await supabase
+        .from("messages")
+        .select("id")
+        .order("id", { ascending: false })
+        .limit(1);
     } catch (error) {
-      console.log(e);
-      return
+      console.log(error);
+      return;
     }
-
-    console.log(result);
-
-    io.emit("chat message", msg , result.lastInsertRowid.toString());
-
+    console.log(lastInsertedId);
+    io.emit(
+      "chat message",
+      msg,
+      lastInsertedId.data[0].id.toString(),
+      username
+    );
   });
+
+  if (!socket.recovered) {
+    try {
+      console.log("Serveroffset : ", socket.handshake.auth.serverOffset);
+      const result = await supabase
+        .from("messages")
+        .select("id, content, username")
+        .gt("id", socket.handshake.auth.serverOffset || 0)
+        .order("id", { ascending: false });
+
+      result.data.forEach((element) => {
+        io.emit(
+          "chat message",
+          element.content,
+          element.id.toString(),
+          element.username
+        );
+      });
+    } catch (error) {
+      console.log(error);
+      return;
+    }
+  }
 });
 
 app.use(logger("dev"));
